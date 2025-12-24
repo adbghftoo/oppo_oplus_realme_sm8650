@@ -1,9 +1,12 @@
-name: 加速版构建 Google 通用 GKI 6.1.118 内核
+name: Google GKI 6.1 通用内核构建
+
 env:
   TZ: Asia/Shanghai
   ANDROID_VERSION: 'android14'
   KERNEL_VERSION: '6.1'
-  KERNEL_NAME: 'android14-6.1-gki'
+  # 指定 GKI 分支，android14-6.1 是目前最主流的 GKI 分支
+  GKI_BRANCH: 'android14-6.1'
+
 on:
   workflow_dispatch:
     inputs:
@@ -18,27 +21,27 @@ on:
           - 'mksu'
           - 'ksu'
       susfs_enable:
-        description: '是否开启susfs(用于增强隐藏环境挂载功能; 可能轻微增加耗电，上游更新导致不稳定时或不需要可关闭)'
+        description: '是否开启susfs(用于增强隐藏环境挂载功能; 需要配套模块)'
         required: true
         type: boolean
         default: 'true'
       kpm_enable:
-        description: '是否开启kpm(仅对sukisu生效; 可能轻微增加耗电，不需要可保持默认关闭)'
+        description: '是否开启kpm(仅对sukisu生效; 增强模块支持)'
         required: true
         type: boolean
         default: 'false'
       lz4_enable:
-        description: '是否安装 lz4 1.10.0+zstd 1.5.7 补丁及 LZ4KD 补丁'
+        description: '是否启用 ZRAM lz4/zstd 压缩算法补丁'
         required: true
         type: boolean
         default: 'true'
       lz4kd_enable:
-        description: '是否安装 LZ4KD 补丁(若已开启lz4+zstd补丁则可不开启)'
+        description: '是否安装 LZ4KD 补丁(高性能解压)'
         required: true
         type: boolean
         default: 'false'
       bbr_enable:
-        description: '是否启用bbr算法(优化上行数据,对手机日用无太大意义甚至可能负优化;false关闭,true仅加入算法,default设为默认)'
+        description: '是否启用BBR/Brutal拥塞控制算法'
         required: true
         type: choice
         default: 'false'
@@ -47,20 +50,15 @@ on:
           - 'true'
           - 'default'
       better_net:
-        description: '是否开启网络功能拓展配置(用于为ipset及需要iptables等高级网络功能内核支持的程序提供支持)'
+        description: '是否开启网络功能拓展(Netfilter/IPSet/TTL等)'
         required: true
         type: boolean
         default: 'true'
-      ccache_debug:
-        description: '是否上传 Ccache调试日志(用于调试, 无需要不必开启)'
-        required: true
-        type: boolean
-        default: 'false'
       kernel_suffix:
-        description: '内核后缀(留空默认,开头别加连字符,勿加空格等影响指令运行的保留字符)'
+        description: '内核后缀(可选)'
         required: false
         type: string
-        default: ''
+        default: 'GKI'
 
 jobs:
   build:
@@ -68,165 +66,288 @@ jobs:
     outputs:
       ksuver: ${{ steps.ksu_version.outputs.ksuver }}
     steps:
-      - name: 安装环境依赖+初始化源码仓库及llvm-Clang20工具链
+      - name: 安装环境依赖
         run: |
           rm -rf kernel_workspace
           mkdir kernel_workspace
           cd kernel_workspace
-         
+          
           sudo apt-mark hold firefox &&
           sudo apt-mark hold libc-bin &&
           sudo apt purge man-db &&
-          sudo rm -rf /var/lib/man-db/auto-update &&
           sudo apt update &&
-          sudo apt-get install -y --no-install-recommends binutils python-is-python3 libssl-dev libelf-dev ccache dwarves pahole &
-         
-          echo "正在克隆 Google 官方 GKI 通用内核源码 (android14-6.1)..."
-          git clone --depth=1 https://android.googlesource.com/kernel/common -b android14-6.1
-          mv common gki_common
-         
-          echo "正在克隆llvm-Clang20工具链..." &&
-          mkdir -p clang20 &&
-          aria2c -s16 -x16 -k1M https://github.com/cctv18/oneplus_sm8650_toolchain/releases/download/LLVM-Clang20-r547379/clang-r547379.zip -o clang.zip &&
-          unzip -q clang.zip -d clang20 &&
-          rm -rf clang.zip &
-         
-          echo "正在克隆构建工具..." &&
-          aria2c -s16 -x16 -k1M https://github.com/cctv18/oneplus_sm8650_toolchain/releases/download/LLVM-Clang20-r547379/build-tools.zip -o build-tools.zip &&
-          unzip -q build-tools.zip &&
-          rm -rf build-tools.zip &
-         
-          wait
-          echo "所有源码及llvm-Clang20工具链初始化完成！"
-          echo "正在去除 dirty 后缀..."
-          for f in gki_common/scripts/setlocalversion; do
-            sed -i 's/ -dirty//g' "$f"
-            sed -i '$i res=$(echo "$res" | sed '\''s/-dirty//g'\'')' "$f"
-          done
+          sudo apt-get install -y --no-install-recommends binutils python-is-python3 libssl-dev libelf-dev ccache git make bc bison flex
+          
+          echo "正在克隆 Google GKI 源码 (Android 14 - 6.1)..."
+          # 使用 Google 官方源码或者国内镜像，这里使用 GitHub 镜像加速下载
+          git clone --depth=1 https://github.com/kernel-toast/android_kernel_common -b ${{ env.GKI_BRANCH }} common
+          
+          echo "正在下载 Google Clang 工具链..."
+          mkdir clang
+          # 下载适合 GKI 6.1 的 Clang 版本 (r487747c 是 Android 14 常用版本)
+          wget -q https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/master/clang-r487747c.tar.gz
+          tar -xf clang-r487747c.tar.gz -C clang/
+          rm clang-r487747c.tar.gz
 
-      # 以下步骤基本保持不变，只修改路径为 gki_common
+          echo "环境准备完成"
+          
+          # 去除 dirty 后缀
+          cd common
+          for f in scripts/setlocalversion; do
+            sed -i 's/ -dirty//g' "$f"
+          done
 
       - name: 配置ccache目录
         run: |
-          echo "CCACHE_DIR=$HOME/.ccache_6.1.118" >> $GITHUB_ENV
+          echo "CCACHE_DIR=$HOME/.ccache_gki" >> $GITHUB_ENV
           echo "CCACHE_MAXSIZE=3G" >> $GITHUB_ENV
 
-      - name: 载入当前版本内核的 ccache缓存
+      - name: 载入ccache缓存
         uses: actions/cache@v4
-        id: ccache-restore
         with:
           path: ${{ env.CCACHE_DIR }}
-          key: ccache-gki-6.1.118-${{ runner.os }}-main
+          key: ccache-gki-${{ env.KERNEL_VERSION }}-${{ runner.os }}
           restore-keys: |
-            ccache-gki-6.1.118-${{ runner.os }}-
-            ccache-gki-6.1.118-
-
-      - name: 初始化并配置ccache
+            ccache-gki-${{ env.KERNEL_VERSION }}-
+      
+      - name: 初始化ccache
         run: |
           export CCACHE_COMPILERCHECK="none"
           export CCACHE_BASEDIR="${{ github.workspace }}"
           export CCACHE_NOHASHDIR="true"
           export CCACHE_HARDLINK="true"
-          export CCACHE_DIR="${{ env.CCACHE_DIR }}"
-          export CCACHE_MAXSIZE="${{ env.CCACHE_MAXSIZE }}"
-          mkdir -p "$CCACHE_DIR"
-          ccache -M "$CCACHE_MAXSIZE"
+          mkdir -p "${{ env.CCACHE_DIR }}"
+          ccache -M "${{ env.CCACHE_MAXSIZE }}"
           ccache -o compression=true
-          echo "ccache初始状态:"
           ccache -s
 
-      - name: 添加KernelSU
+      - name: 添加 KernelSU
         id: ksu_version
         run: |
-          cd kernel_workspace/gki_common
-          # KSU 添加逻辑保持不变（路径调整为当前目录）
+          cd kernel_workspace/common
+          # 针对 GKI，直接在源码根目录执行
           if [[ ${{ github.event.inputs.ksu_type }} == "sukisu" ]]; then
+            echo "正在配置 SukiSU Ultra..."
             curl -LSs "https://raw.githubusercontent.com/ShirkNeko/SukiSU-Ultra/refs/heads/main/kernel/setup.sh" | bash -s tmp-builtin
-            # 版本处理保持原样...
-          # 其他分支保持原样，只改路径
+            # 获取版本逻辑保持不变，确保 env 正确
+            cd KernelSU
+            KSU_VERSION=$(expr $(git rev-list --count main) + 37185 2>/dev/null || echo 114514)
+            echo "KSUVER=$KSU_VERSION" >> $GITHUB_ENV
+            echo "ksuver=$KSU_VERSION" >> $GITHUB_OUTPUT
+          elif [[ ${{ github.event.inputs.ksu_type }} == "ksunext" ]]; then
+            echo "正在配置 KernelSU Next..."
+            curl -LSs "https://raw.githubusercontent.com/pershoot/KernelSU-Next/next-susfs/kernel/setup.sh" | bash -s next-susfs
+            cd KernelSU-Next
+            KSU_VERSION=$(expr $(curl -sI "https://api.github.com/repos/pershoot/KernelSU-Next/commits?sha=stable&per_page=1" | grep -i "link:" | sed -n 's/.*page=\([0-9]*\)>; rel="last".*/\1/p') "+" 10200)
+            echo "KSUVER=$KSU_VERSION" >> $GITHUB_ENV
+            echo "ksuver=$KSU_VERSION" >> $GITHUB_OUTPUT
+          elif [[ ${{ github.event.inputs.ksu_type }} == "mksu" ]]; then
+             echo "正在配置 MKSU..."
+             curl -LSs "https://raw.githubusercontent.com/5ec1cff/KernelSU/refs/heads/main/kernel/setup.sh" | bash -s main
+             cd KernelSU
+             KSU_VERSION=$(expr $(curl -sI "https://api.github.com/repos/5ec1cff/KernelSU/commits?sha=main&per_page=1" | grep -i "link:" | sed -n 's/.*page=\([0-9]*\)>; rel="last".*/\1/p') "+" 30000)
+             echo "KSUVER=$KSU_VERSION" >> $GITHUB_ENV
+             echo "ksuver=$KSU_VERSION" >> $GITHUB_OUTPUT
+          else
+             echo "正在配置原版 KernelSU..."
+             curl -LSs "https://raw.githubusercontent.com/tiann/KernelSU/refs/heads/main/kernel/setup.sh" | bash -s main
+             cd KernelSU
+             KSU_VERSION=$(expr $(curl -sI "https://api.github.com/repos/tiann/KernelSU/commits?sha=main&per_page=1" | grep -i "link:" | sed -n 's/.*page=\([0-9]*\)>; rel="last".*/\1/p') "+" 30000)
+             echo "KSUVER=$KSU_VERSION" >> $GITHUB_ENV
+             echo "ksuver=$KSU_VERSION" >> $GITHUB_OUTPUT
           fi
 
-      - name: 应用 KernelSU & SUSFS 补丁
+      - name: 应用 SUSFS 补丁
         if: inputs.susfs_enable
         run: |
-          cd kernel_workspace/gki_common
+          cd kernel_workspace/common
+          echo "正在下载 SUSFS 补丁..."
           git clone --depth=1 https://gitlab.com/simonpunk/susfs4ksu.git -b gki-${{ env.ANDROID_VERSION }}-${{ env.KERNEL_VERSION }}
+          
+          # 复制 generic GKI 补丁
           cp ./susfs4ksu/kernel_patches/50_add_susfs_in_gki-${{ env.ANDROID_VERSION }}-${{ env.KERNEL_VERSION }}.patch ./
-          cp -r ./susfs4ksu/kernel_patches/fs/* ./fs/
-          cp -r ./susfs4ksu/kernel_patches/include/linux/* ./include/linux/
+          cp ./susfs4ksu/kernel_patches/fs/* ./fs/
+          cp ./susfs4ksu/kernel_patches/include/linux/* ./include/linux/
+          
+          # 应用补丁
           patch -p1 < 50_add_susfs_in_gki-${{ env.ANDROID_VERSION }}-${{ env.KERNEL_VERSION }}.patch || true
-          # 移除厂商特定补丁（如69_hide_stuff.patch、scope_min_manual_hooks 等）
+          
+          # KSU 侧的补丁 (仅非 sukisu/next 需要手动打部分补丁，这里简化处理)
+          if [[ -d "KernelSU" ]]; then
+             cp ./susfs4ksu/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch ./KernelSU/
+             cd KernelSU
+             patch -p1 < 10_enable_susfs_for_ksu.patch || true
+             cd ..
+          fi
 
-      - name: 应用lz4 1.10.0 & zstd 1.5.7补丁
+      - name: 应用 Lz4/Zstd 补丁
         if: inputs.lz4_enable
         run: |
-          cd kernel_workspace/gki_common
-          # lz4/zstd 补丁通用，可保留（如果有来源）或移除如果不兼容
+          cd kernel_workspace/common
+          echo "应用压缩算法补丁..."
+          # 使用通用的补丁源
+          wget https://github.com/cctv18/oppo_oplus_realme_sm8650/raw/refs/heads/main/zram_patch/001-lz4.patch
+          wget https://github.com/cctv18/oppo_oplus_realme_sm8650/raw/refs/heads/main/zram_patch/002-zstd.patch
+          # 尝试应用
+          git apply -p1 < 001-lz4.patch || true
+          patch -p1 < 002-zstd.patch || true
 
-      - name: 应用 lz4kd 补丁
-        if: inputs.lz4kd_enable
+      - name: 配置 GKI 参数
         run: |
-          cd kernel_workspace/gki_common
-          # lz4kd 补丁保持原样
+          cd kernel_workspace/common
+          # 使用 GKI 默认配置
+          CONF="arch/arm64/configs/gki_defconfig"
+          
+          echo "CONFIG_KSU=y" >> $CONF
+          
+          if [[ "${{ github.event.inputs.susfs_enable }}" == "true" ]]; then
+            echo "CONFIG_KSU_SUSFS=y" >> $CONF
+            echo "CONFIG_KSU_SUSFS_HAS_MAGIC_MOUNT=y" >> $CONF
+            echo "CONFIG_KSU_SUSFS_SUS_PATH=y" >> $CONF
+            echo "CONFIG_KSU_SUSFS_SUS_MOUNT=y" >> $CONF
+            echo "CONFIG_KSU_SUSFS_AUTO_ADD_SUS_KSU_DEFAULT_MOUNT=y" >> $CONF
+            echo "CONFIG_KSU_SUSFS_AUTO_ADD_SUS_BIND_MOUNT=y" >> $CONF
+            echo "CONFIG_KSU_SUSFS_SUS_KSTAT=y" >> $CONF
+            echo "CONFIG_KSU_SUSFS_TRY_UMOUNT=y" >> $CONF
+            echo "CONFIG_KSU_SUSFS_SPOOF_UNAME=y" >> $CONF
+            echo "CONFIG_KSU_SUSFS_ENABLE_LOG=y" >> $CONF
+            echo "CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS=y" >> $CONF
+            echo "CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG=y" >> $CONF
+            echo "CONFIG_KSU_SUSFS_OPEN_REDIRECT=y" >> $CONF
+            echo "CONFIG_KSU_SUSFS_SUS_MAP=y" >> $CONF
+          fi
+          
+          # Mountify 支持
+          echo "CONFIG_TMPFS_XATTR=y" >> $CONF
+          echo "CONFIG_TMPFS_POSIX_ACL=y" >> $CONF
+          
+          # 网络增强
+          if [[ "${{ github.event.inputs.better_net }}" == "true" ]]; then
+            echo "CONFIG_BPF_STREAM_PARSER=y" >> $CONF
+            echo "CONFIG_NETFILTER_XT_MATCH_ADDRTYPE=y" >> $CONF
+            echo "CONFIG_NETFILTER_XT_SET=y" >> $CONF
+            echo "CONFIG_IP_SET=y" >> $CONF
+            echo "CONFIG_IP_SET_MAX=65534" >> $CONF
+            echo "CONFIG_IP6_NF_NAT=y" >> $CONF
+            echo "CONFIG_IP6_NF_TARGET_MASQUERADE=y" >> $CONF
+          fi
+          
+          # BBR
+          if [[ "${{ github.event.inputs.bbr_enable }}" != "false" ]]; then
+            echo "CONFIG_TCP_CONG_ADVANCED=y" >> $CONF
+            echo "CONFIG_TCP_CONG_BBR=y" >> $CONF
+            echo "CONFIG_TCP_CONG_CUBIC=y" >> $CONF
+            echo "CONFIG_TCP_CONG_BRUTAL=y" >> $CONF
+            if [[ "${{ github.event.inputs.bbr_enable }}" == "default" ]]; then
+              echo "CONFIG_DEFAULT_TCP_CONG=bbr" >> $CONF
+            fi
+          fi
 
-      - name: 添加SUSFS 配置项
-        if: inputs.susfs_enable
-        run: |
-          cd kernel_workspace/gki_common
-          echo "CONFIG_KSU_SUSFS=y" >> ./arch/arm64/configs/gki_defconfig
-          # 其他 susfs 配置保持
-
-      - name: 添加 KSU & 其他配置项
-        run: |
-          cd kernel_workspace/gki_common
-          echo "CONFIG_KSU=y" >> ./arch/arm64/configs/gki_defconfig
-          # kpm、tmpfs 等通用配置保持
-          echo "CONFIG_CC_OPTIMIZE_FOR_PERFORMANCE=y" >> ./arch/arm64/configs/gki_defconfig
-          echo "CONFIG_HEADERS_INSTALL=n" >> ./arch/arm64/configs/gki_defconfig
-
-      - name: 启用网络功能增强优化配置
-        if: inputs.better_net
-        run: |
-          cd kernel_workspace/gki_common
-          # 网络配置通用，保持
-
-      - name: 添加 BBR 等一系列拥塞控制算法
-        run: |
-          # BBR 等通用，保持
-
-      # 移除三星SSG、Re-Kernel、基带保护等厂商特定步骤
-
-      - name: 添加制作名称
-        run: |
-          # 保持
-
+          # 禁用模块签名检查以允许加载未签名模块（可选，GKI 通常不需要严格签名如果禁用了检查）
+          echo "CONFIG_MODULE_SIG=n" >> $CONF
+          
       - name: 构建内核
         run: |
-          WORKDIR="$(pwd)"
-          export PATH="/usr/lib/ccache:$PATH"
-          export PATH="$WORKDIR/kernel_workspace/clang20/bin:$PATH"
-          export PATH="$WORKDIR/kernel_workspace/build-tools/bin:$PATH"
-         
-          cd kernel_workspace/gki_common
-          # 时间劫持保持
-         
-          make -j$(nproc --all) LLVM=1 ARCH=arm64 O=out gki_defconfig &&
-          make -j$(nproc --all) LLVM=1 ARCH=arm64 O=out Image.lz4
-
-      - name: 应用KPM并修补内核
+          cd kernel_workspace/common
+          
+          # 设置环境变量
+          export PATH="$GITHUB_WORKSPACE/kernel_workspace/clang/bin:$PATH"
+          export ARCH=arm64
+          export SUBARCH=arm64
+          export CROSS_COMPILE=aarch64-linux-gnu-
+          export CROSS_COMPILE_COMPAT=arm-linux-gnueabi-
+          export CC="ccache clang"
+          export LD=ld.lld
+          
+          # 输出版本信息
+          clang --version
+          
+          # 生成配置
+          make O=out gki_defconfig
+          
+          # 开始编译
+          # GKI 构建通常会生成 Image 和 Image.lz4
+          make -j$(nproc) O=out LLVM=1 LLVM_IAS=1 Image Image.lz4
+          
+          echo "内核编译完成！"
+          ls -lh out/arch/arm64/boot/Image
+          
+      - name: 应用 KPM (Sukisu Only)
+        if: inputs.kpm_enable && inputs.ksu_type == 'sukisu'
         run: |
-          # 保持（如果启用 kpm）
+          cd kernel_workspace/common/out/arch/arm64/boot
+          echo "应用 KPM 补丁..."
+          curl -LO https://github.com/SukiSU-Ultra/SukiSU_KernelPatch_patch/releases/download/0.12.2/patch_linux
+          chmod +x patch_linux
+          ./patch_linux
+          rm -f Image
+          mv oImage Image
 
-      - name: 克隆 AnyKernel3 并打包
+      - name: 打包 AnyKernel3
         run: |
           cd kernel_workspace
           git clone https://github.com/cctv18/AnyKernel3 --depth=1
           rm -rf ./AnyKernel3/.git
           cd AnyKernel3
-          cp ../gki_common/out/arch/arm64/boot/Image.lz4 ./Image.lz4  # GKI 用 .lz4
-          # zip 打包保持，文件名调整为 GKI
+          
+          # 复制内核镜像
+          cp ../common/out/arch/arm64/boot/Image ./
+          
+          # 修改 anykernel.sh 以适配 Generic
+          sed -i 's/do.devicecheck=1/do.devicecheck=0/g' anykernel.sh
+          
+          # 确定名称变量
+          if [[ ${{ github.event.inputs.ksu_type }} == "sukisu" ]]; then
+            KSU_TYPE="SukiSU"
+          else
+            KSU_TYPE="KSU"
+          fi
+          
+          SUFFIX="${{ github.event.inputs.kernel_suffix }}"
+          ZIP_NAME="GKI6.1_${KSU_TYPE}_${{ env.KSUVER }}_${SUFFIX}.zip"
+          
+          zip -r "../$ZIP_NAME" ./*
+          echo "ZIP_NAME=$ZIP_NAME" >> $GITHUB_ENV
 
-      # 上传和 release 步骤保持不变，调整描述为 “Google 通用 GKI 内核”
+      - name: 上传工件
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.ZIP_NAME }}
+          path: kernel_workspace/${{ env.ZIP_NAME }}
 
   release:
-    # 保持，调整 body 描述为 Google 通用 GKI
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: 下载工件
+        uses: actions/download-artifact@v4
+        with:
+          path: ./release_files
+          merge-multiple: true
+
+      - name: 创建 Release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: "GKI-6.1-${{ env.TZ }}-${{ github.run_id }}"
+          name: "Google GKI 6.1 Kernel (${{ inputs.ksu_type }})"
+          body: |
+            ### 🐧 Google GKI 6.1 通用内核构建
+            
+            **构建信息：**
+            - **内核源码**: Android Common Kernel (android14-6.1)
+            - **KernelSU分支**: ${{ inputs.ksu_type }}
+            - **SUSFS**: ${{ inputs.susfs_enable }}
+            - **Lz4/Zstd**: ${{ inputs.lz4_enable }}
+            - **BBR**: ${{ inputs.bbr_enable }}
+            
+            **适用设备：**
+            - 支持 GKI 2.0 且内核版本为 6.1 的 Android 设备（如骁龙 8Gen3 机型）。
+            
+            **刷入方法：**
+            - 使用 KernelFlasher、Franco Kernel Manager 或 TWRP 刷入 zip 包。
+            - **注意**：刷入前请务必备份原版 boot.img，GKI 刷写有风险。
+            
+          files: |
+            release_files/*.zip
