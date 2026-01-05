@@ -15,8 +15,8 @@
 #ifdef CONFIG_KSU_SUSFS
 #include <linux/namei.h>
 #include <linux/susfs.h>
-// 额外包含 susfs_def.h 以防 SUSFS_MAGIC 定义在此处
-#include <linux/susfs_def.h> 
+// 显式包含定义文件，防止 SUSFS_MAGIC 未定义
+#include <linux/susfs_def.h>
 #endif // #ifdef CONFIG_KSU_SUSFS
 
 #include "supercalls.h"
@@ -1036,7 +1036,9 @@ int ksu_handle_sys_reboot(int magic1, int magic2, unsigned int cmd, void __user 
 #endif //#ifdef CONFIG_KSU_SUSFS_SPOOF_UNAME
 #ifdef CONFIG_KSU_SUSFS_ENABLE_LOG
 		if (cmd == CMD_SUSFS_ENABLE_LOG) {
-			susfs_enable_log((bool __user *)(*arg));
+			// 注意：这里需要根据 susfs 的具体实现来确定参数类型，
+			// 如果 susfs_enable_log 接收 bool 值，则需要强制转换 *arg 的值
+			susfs_enable_log((bool)(unsigned long)(*arg));
 			return 0;
 		}
 #endif //#ifdef CONFIG_KSU_SUSFS_ENABLE_LOG
@@ -1073,7 +1075,7 @@ int ksu_handle_sys_reboot(int magic1, int magic2, unsigned int cmd, void __user 
 		}
 #endif // #ifdef CONFIG_KSU_SUSFS_SUS_MAP
 		if (cmd == CMD_SUSFS_ENABLE_AVC_LOG_SPOOFING) {
-			susfs_set_avc_log_spoofing((bool __user *)(*arg));
+			susfs_set_avc_log_spoofing((bool)(unsigned long)(*arg));
 			return 0;
 		}
 		if (cmd == CMD_SUSFS_SHOW_ENABLED_FEATURES) {
