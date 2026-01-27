@@ -1,4 +1,4 @@
-name: 打包修改版源码 6.1.118 (无编译+改名)
+name: OKI 6.1.118 源码上传 (Patched)
 
 env:
   TZ: Asia/Shanghai
