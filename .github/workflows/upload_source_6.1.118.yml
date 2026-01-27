@@ -67,7 +67,7 @@ on:
         description: '内核级基带保护(应用源码补丁)'
         required: true
         type: boolean
-        default: 'true'
+        default: 'false'
       kernel_suffix:
         description: '内核后缀(将硬写入源码setlocalversion脚本中)'
         required: false
